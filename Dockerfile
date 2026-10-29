@@ -1,4 +1,4 @@
-FROM node as front-build
+FROM node:20-alpine as front-build
 
 COPY ./front /src
 
@@ -7,7 +7,7 @@ WORKDIR /src
 RUN npm ci \
     && npx @angular/cli build --optimization
 
-FROM gradle:jdk17 as back-build
+FROM gradle:8.7-jdk17 as back-build
 
 COPY ./back /src
 
@@ -33,11 +33,15 @@ FROM alpine:3.19 as back
 
 COPY --from=back-build /src/build/libs/microcrm-0.0.1-SNAPSHOT.jar /app/back/microcrm-0.0.1-SNAPSHOT.jar
 
-RUN apk add openjdk21-jre-headless
+RUN apk add openjdk21-jre-headless \
+    && addgroup -S microcrm \
+    && adduser -S -G microcrm microcrm
 
 WORKDIR /app
 
-EXPOSE 4200
+EXPOSE 8080
+
+USER microcrm
 
 CMD ["java", "-jar", "/app/back/microcrm-0.0.1-SNAPSHOT.jar"]
 

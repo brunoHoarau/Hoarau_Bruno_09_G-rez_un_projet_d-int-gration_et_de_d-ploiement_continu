@@ -31,14 +31,14 @@ jobs:
       run:
         working-directory: back
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v5
 
       - name: Build, tests et couverture (JaCoCo)
         run: ./gradlew build
@@ -52,7 +52,7 @@ jobs:
 
       - name: Sauvegarde des résultats (tests, couverture, classes)
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: back-reports
           retention-days: 14
@@ -71,9 +71,9 @@ jobs:
       run:
         working-directory: front
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: npm
@@ -103,7 +103,7 @@ jobs:
 
       - name: Sauvegarde de la couverture
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: front-coverage
           retention-days: 14
@@ -116,17 +116,17 @@ jobs:
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Historique complet : nécessaire pour détecter le « nouveau code »
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: back-reports
           path: back/build
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: front-coverage
           path: front/coverage
@@ -143,14 +143,15 @@ jobs:
         run: echo "::warning::Secret SONAR_TOKEN absent (PR depuis un fork ?), analyse SonarQube ignorée."
 
   docker:
-    name: Build des images Docker
+    name: Build et scan des images Docker
     needs: [back, front]
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target: [back, front]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 
@@ -160,6 +161,18 @@ jobs:
           context: .
           target: ${{ matrix.target }}
           push: false
+          # Image chargée dans le Docker local du runner pour pouvoir la scanner
+          load: true
           tags: orion-microcrm-${{ matrix.target }}:ci
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+      # Échec si une vulnérabilité CRITIQUE corrigeable est trouvée ; HIGH affichées pour information
+      - name: Scan de sécurité (Trivy)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.0 \
+            image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 0 \
+            orion-microcrm-${{ matrix.target }}:ci
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.0 \
+            image --scanners vuln --ignore-unfixed --severity CRITICAL --exit-code 1 \
+            orion-microcrm-${{ matrix.target }}:ci

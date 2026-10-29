@@ -9,6 +9,10 @@ services:
     ports:
       # Exposé sur l'hôte : le front appelle l'API depuis le navigateur (http://localhost:8080)
       - "8080:8080"
+    # Durcissement : aucune capacité Linux, pas d'élévation de privilèges
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/"]
       interval: 10s
@@ -25,9 +29,13 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # Seule capacité conservée : écouter sur les ports 80/443 sans être root.
+    # (no-new-privileges n'est pas activé : il empêcherait caddy d'utiliser cette capacité)
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
     volumes:
       # Conserve l'autorité de certification locale de Caddy entre deux redémarrages
-      - caddy-data:/root/.local/share/caddy
+      - caddy-data:/data
     depends_on:
       back:
         condition: service_healthy

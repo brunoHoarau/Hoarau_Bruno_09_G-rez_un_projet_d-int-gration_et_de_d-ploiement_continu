@@ -120,22 +120,52 @@ Le projet est configuré en *monorepo* : un projet Sonar unique avec `sonar.sour
 
 ### 3.1 Rôle du Dockerfile existant
 
-Le `Dockerfile` à la racine est **multi-stage**. Il compile les sources dans des images de build lourdes, puis copie seulement le résultat dans des images d'exécution légères (Alpine) :
+Le `Dockerfile` à la racine est **multi-stage**. Il compile les sources dans des images de build complètes, puis copie seulement le résultat dans des images d'exécution minimales :
 
-| Stage | Rôle |
-|---|---|
-| `front-build` | Image Node : `npm ci` puis build Angular optimisé |
-| `back-build` | Image Gradle JDK 17 : `./gradlew build` produit le JAR (et exécute les tests) |
-| `front` | Alpine + **Caddy** : sert les fichiers statiques Angular (ports 80/443, HTTPS local, repli sur `index.html` pour le routage) |
-| `back` | Alpine + JRE 21 : lance le JAR Spring Boot (API sur le port 8080) |
-| `standalone` | Regroupe front et back dans un seul conteneur piloté par **supervisord** (démo et tests rapides) |
+| Stage | Image de base | Rôle |
+|---|---|---|
+| `front-build` | `node:20-alpine` | `npm ci` puis build Angular de production |
+| `back-build` | `gradle:8.7-jdk17-alpine` | `gradle bootJar` produit le JAR exécutable |
+| `front` | `caddy:2.8-alpine` | Sert les fichiers statiques Angular (ports 80/443, HTTPS local, repli sur `index.html` pour le routage) |
+| `back` | `eclipse-temurin:17-jre-alpine` | Lance le JAR Spring Boot (API sur le port 8080) |
+| `standalone` | `eclipse-temurin:17-jre-alpine` | Front + back dans un seul conteneur piloté par **supervisord** (démonstration) |
 
 Intérêt : une même recette produit un environnement identique en local, en CI et en déploiement, sans installer Java ni Node sur la machine cible.
 
-Points à corriger avant l'automatisation :
-- le stage `back` déclare `EXPOSE 4200` alors que l'API écoute sur **8080** ;
-- l'image `node` n'est pas versionnée ;
-- l'URL de l'API est codée en dur dans le front (`front/src/app/config.ts` : `http://localhost:8080`) : elle convient en local, mais devra être rendue configurable pour un déploiement réel.
+#### Vérification du Dockerfile d'origine
+
+| Constat | Risque | Correction |
+|---|---|---|
+| Images d'exécution `alpine:3.19` + `apk add caddy` / `apk add openjdk21-jre-headless` | Paquets installés à la main, non maintenus comme une image officielle ; Alpine 3.19 n'est plus supportée | Images officielles `caddy` et `eclipse-temurin`, déjà prêtes et mises à jour par leurs mainteneurs |
+| Exécution avec un **JRE 21** d'un code compilé pour **Java 17** | Écart entre l'environnement testé (CI, JDK 17) et la production | `eclipse-temurin:17-jre-alpine` : même version que la CI |
+| `FROM node` sans version | Build non reproductible, version de Node changeante | `node:20-alpine` |
+| `EXPOSE 4200` sur l'API | Documentation de port fausse (l'API écoute sur 8080) | `EXPOSE 8080` |
+| Conteneurs exécutés en `root` | Une faille applicative donne les droits root dans le conteneur | Utilisateur dédié `microcrm` pour `front` et `back` |
+| `./gradlew build` dans l'image | Re-téléchargement de Gradle, tests exécutés une seconde fois | `gradle bootJar` (Gradle 8.7 inclus dans l'image) ; les tests sont faits par la CI |
+| Copie de tout le dossier `front` avant `npm ci` | Toute modification de code invalide le cache des dépendances | `package*.json` copiés d'abord, `npm ci` mis en cache |
+| Image `standalone` construite par copie de systèmes de fichiers entiers (`COPY --from=front / /`) | Image lourde et fragile (fichiers système écrasés) | Ne copie que le binaire `caddy`, le build Angular et le JAR |
+
+#### Choix des images de base
+
+| Image | Pourquoi |
+|---|---|
+| `eclipse-temurin:17-jre-alpine` | Distribution **officielle** d'OpenJDK par la fondation Eclipse (Adoptium), « Docker Official Image ». Remplace `openjdk`, dépréciée et plus mise à jour. **JRE** seulement (pas de compilateur), base Alpine : ~190 Mo contre ~400 Mo pour un JDK. |
+| `caddy:2.8-alpine` | Image **officielle** Caddy, ~50 Mo. Le binaire a la capacité `cap_net_bind_service`, ce qui permet d'écouter sur 80/443 **sans être root**. HTTPS automatique. |
+| `node:20-alpine` | Image **officielle** Node.js. Node 20 est la dernière LTS supportée par Angular 17. Elle ne sert qu'à la compilation : elle n'est **pas présente dans l'image livrée**. |
+| `gradle:8.7-jdk17-alpine` | Image **officielle** Gradle, même version que le Gradle Wrapper du projet. Utilisée uniquement pour la compilation. |
+
+Variantes *alpine* plutôt que *slim* (Debian) : elles sont encore plus petites, donc moins de paquets et moins de vulnérabilités potentielles. Les images de build lourdes (Node, Gradle, JDK) ne se retrouvent jamais dans les images finales grâce au multi-stage.
+
+#### Bonnes pratiques de sécurité appliquées
+
+- Images officielles à version fixée, aucune image `latest` dans le `Dockerfile`.
+- Utilisateur non-root (`microcrm`) dans les images `front` et `back`.
+- Image d'exécution sans outils de build ni code source (seulement le JAR ou les fichiers statiques).
+- `.dockerignore` : exclut `node_modules`, `build`, `.git`, rapports de tests… du contexte de build.
+- Dans `docker-compose.yml` : `cap_drop: ALL` sur les deux services (seule `NET_BIND_SERVICE` est rendue à `front`) et `no-new-privileges` sur `back`.
+- Scan des images : **Trivy** (open source, Aqua Security), équivalent gratuit de Twistlock / Prisma Cloud, exécuté dans le job `docker` de la CI. Les vulnérabilités HIGH et CRITICAL sont affichées ; le job échoue sur une vulnérabilité CRITICAL pour laquelle un correctif existe. Commande locale : `docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.58.0 image orion-microcrm-back:latest`.
+
+Limite connue : l'URL de l'API est codée en dur dans le front (`front/src/app/config.ts` : `http://localhost:8080`). Elle convient en local, mais devra être rendue configurable pour un déploiement réel. L'image `standalone` s'exécute en root, car supervisord pilote deux processus ; elle est réservée à la démonstration.
 
 ### 3.2 Rôle de docker-compose
 

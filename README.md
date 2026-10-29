@@ -153,3 +153,19 @@ docker run -it --rm -p 8080:8080 -p 80:80 -p 443:443 orion-microcrm-standalone:l
 ```
 
 L'application sera disponible sur https://localhost et l'API sur http://localhost:8080.
+
+#### Docker Compose
+
+```shell
+docker compose up --build -d
+```
+
+L'application sera disponible sur https://localhost et l'API sur http://localhost:8080. Le front démarre une fois l'API prête.
+
+Pour arrêter la stack :
+
+```shell
+docker compose down
+```
+
+Les variables `MICROCRM_BACK_IMAGE` et `MICROCRM_FRONT_IMAGE` permettent d'utiliser des images publiées (par ex. sur GHCR) au lieu des noms locaux par défaut.

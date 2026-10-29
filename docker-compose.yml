@@ -1,0 +1,37 @@
+name: microcrm
+
+services:
+  back:
+    build:
+      context: .
+      target: back
+    image: ${MICROCRM_BACK_IMAGE:-orion-microcrm-back:latest}
+    ports:
+      # Exposé sur l'hôte : le front appelle l'API depuis le navigateur (http://localhost:8080)
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  front:
+    build:
+      context: .
+      target: front
+    image: ${MICROCRM_FRONT_IMAGE:-orion-microcrm-front:latest}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Conserve l'autorité de certification locale de Caddy entre deux redémarrages
+      - caddy-data:/root/.local/share/caddy
+    depends_on:
+      back:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy-data:

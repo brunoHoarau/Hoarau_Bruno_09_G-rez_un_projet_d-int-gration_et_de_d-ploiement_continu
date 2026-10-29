@@ -12,7 +12,7 @@ Il couvre trois volets : le plan de testing périodique, le plan de sécurité, 
 | Front-end | Angular 17, tests Jasmine/Karma (Chrome Headless), couverture via `karma-coverage` |
 | Tests existants (back) | `MicroCRMApplicationTests` (chargement du contexte Spring), `PersonRepositoryIntegrationTest` (`@DataJpaTest`, recherche par e-mail) |
 | Tests existants (front) | 8 tests unitaires (`*.spec.ts`) : composants `App`, `MainDashboard`, `OrganizationDetails`, `PersonDetails`, services `Person` et `Organization` |
-| Conteneurisation | Un `Dockerfile` multi-stage (cibles `front`, `back`, `standalone`), pas encore de `docker-compose.yml` |
+| Conteneurisation | Un `Dockerfile` multi-stage (cibles `front`, `back`, `standalone`) et un `docker-compose.yml` (services `front` + `back`) |
 | Outils retenus | GitHub Actions (CI/CD), SonarQube Cloud (qualité/sécurité), GitHub Container Registry – GHCR (images) |
 
 Le projet est petit, sans base de données externe ni environnement de production existant : les plans ci-dessous restent volontairement simples et réalistes.
@@ -139,7 +139,7 @@ Points à corriger avant l'automatisation :
 
 ### 3.2 Rôle de docker-compose
 
-Il n'existe pas encore de `docker-compose.yml`. Il sera ajouté pour :
+Le fichier `docker-compose.yml` à la racine sert à :
 
 - **orchestrer** les deux services `front` et `back` (images construites depuis les cibles du `Dockerfile`), avec leurs ports et un réseau commun ;
 - lancer toute l'application avec **une seule commande** (`docker compose up --build`), en local comme sur un serveur ;
@@ -184,5 +184,5 @@ push/PR ──► Tests back + front ──► SonarQube Cloud (Quality Gate) �
 2. Ajouter JaCoCo (back) et le reporter `lcov` (front) pour la couverture.
 3. Créer le projet SonarQube Cloud, le secret `SONAR_TOKEN` et la Quality Gate.
 4. Écrire le workflow GitHub Actions : tests → Sonar → build → scan → publication GHCR.
-5. Ajouter `docker-compose.yml` et la configuration Dependabot.
+5. Ajouter la configuration Dependabot.
 6. Activer la protection de la branche `main`.

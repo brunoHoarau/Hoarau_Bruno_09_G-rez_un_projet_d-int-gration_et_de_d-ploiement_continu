@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run hebdomadaire de non-régression : chaque lundi à 6 h (UTC)
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+# Un nouveau push annule le run en cours sur la même branche
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Permissions minimales par défaut, élargies job par job si besoin
+permissions:
+  contents: read
+
+jobs:
+  back:
+    name: Back-end – build & tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write # publication du rapport de tests
+    defaults:
+      run:
+        working-directory: back
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build, tests et couverture (JaCoCo)
+        run: ./gradlew build
+
+      - name: Rapport de tests
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@v5
+        with:
+          check_name: Tests back-end
+          report_paths: back/build/test-results/test/*.xml
+
+      - name: Sauvegarde des résultats (tests, couverture, classes)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: back-reports
+          retention-days: 14
+          path: |
+            back/build/classes
+            back/build/reports
+            back/build/test-results
+
+  front:
+    name: Front-end – build & tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      # Non bloquant : les failles connues d'Angular 17 ne se corrigent qu'en migrant
+      # vers une version majeure supérieure (voir docs/plan-ci-cd.md)
+      - name: Audit des dépendances
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Tests unitaires et couverture (Karma, Chrome Headless)
+        run: npm run test:ci
+
+      - name: Build de production
+        run: npx ng build --configuration production
+
+      - name: Rapport de tests
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@v5
+        with:
+          check_name: Tests front-end
+          report_paths: front/test-results/*.xml
+
+      - name: Sauvegarde de la couverture
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: front-coverage
+          retention-days: 14
+          path: front/coverage
+
+  sonar:
+    name: Analyse SonarQube Cloud
+    needs: [back, front]
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Historique complet : nécessaire pour détecter le « nouveau code »
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: back-reports
+          path: back/build
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: front-coverage
+          path: front/coverage
+
+      - name: Analyse et Quality Gate
+        if: ${{ env.SONAR_TOKEN != '' }}
+        uses: SonarSource/sonarqube-scan-action@v5
+        with:
+          # Fait échouer le job si la Quality Gate n'est pas respectée
+          args: -Dsonar.qualitygate.wait=true
+
+      - name: Token SonarQube absent
+        if: ${{ env.SONAR_TOKEN == '' }}
+        run: echo "::warning::Secret SONAR_TOKEN absent (PR depuis un fork ?), analyse SonarQube ignorée."
+
+  docker:
+    name: Build des images Docker
+    needs: [back, front]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [back, front]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build de l'image ${{ matrix.target }} (sans publication)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          push: false
+          tags: orion-microcrm-${{ matrix.target }}:ci
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}

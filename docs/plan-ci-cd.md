@@ -27,10 +27,10 @@ Le projet est petit, sans base de données externe ni environnement de productio
 |---|---|---|---|
 | Back | Tests unitaires et d'intégration | `./gradlew test` (JUnit 5, Spring Boot Test) | Démarrage du contexte Spring, accès aux données JPA (repositories) |
 | Back | Build | `./gradlew build` | Compilation et production du JAR exécutable |
-| Back | Couverture de code | JaCoCo (plugin Gradle à ajouter) | Rapport XML transmis à SonarQube Cloud |
-| Front | Tests unitaires | `npm test -- --watch=false --browsers=ChromeHeadlessNoSandbox --code-coverage` | Création des composants, appels HTTP des services |
+| Back | Couverture de code | JaCoCo (plugin Gradle) | Rapport XML transmis à SonarQube Cloud |
+| Front | Tests unitaires | `npm run test:ci` (Chrome Headless, sans mode watch, avec couverture) | Création des composants, appels HTTP des services |
 | Front | Build de production | `npx ng build --configuration production` | Compilation TypeScript et bundle de production valides |
-| Front | Couverture de code | `karma-coverage` (reporter `lcov` à ajouter) | Rapport `lcov.info` transmis à SonarQube Cloud |
+| Front | Couverture de code | `karma-coverage` (reporter `lcov`) | Rapport `lcov.info` transmis à SonarQube Cloud |
 | Global | Build des images Docker | `docker build --target front` / `--target back` | Les images se construisent à partir des sources |
 
 Les tests de bout en bout (E2E) ne sont pas retenus pour l'instant : le projet n'en contient pas et leur mise en place dépasse le périmètre. Ils pourront être ajoutés plus tard (par ex. Cypress ou Playwright contre l'environnement `docker compose`).
@@ -180,9 +180,66 @@ push/PR ──► Tests back + front ──► SonarQube Cloud (Quality Gate) �
 
 ## 4. Synthèse des actions à mener (mise en œuvre)
 
-1. Corriger le `Dockerfile` (`EXPOSE 8080`, version de l'image Node, utilisateur non-root).
-2. Ajouter JaCoCo (back) et le reporter `lcov` (front) pour la couverture.
-3. Créer le projet SonarQube Cloud, le secret `SONAR_TOKEN` et la Quality Gate.
-4. Écrire le workflow GitHub Actions : tests → Sonar → build → scan → publication GHCR.
-5. Ajouter la configuration Dependabot.
-6. Activer la protection de la branche `main`.
+1. ✅ Corriger le `Dockerfile` (`EXPOSE 8080`, versions d'images fixées, back non-root).
+2. ✅ Ajouter `docker-compose.yml`.
+3. ✅ Ajouter JaCoCo (back) et les reporters `lcov` + JUnit (front).
+4. ✅ Écrire le workflow CI GitHub Actions (tests → Sonar → build des images).
+5. Créer le projet SonarQube Cloud, le secret `SONAR_TOKEN` et la Quality Gate.
+6. Ajouter le scan Trivy et la publication GHCR (pipeline CD).
+7. Ajouter la configuration Dependabot.
+8. Activer la protection de la branche `main`.
+
+---
+
+## 5. Mise en œuvre du pipeline CI
+
+Le pipeline est décrit dans un seul fichier, `.github/workflows/ci.yml`, qui centralise toute la logique d'automatisation.
+
+### 5.1 Déclencheurs
+
+| Déclencheur | Raison |
+|---|---|
+| `push` (toutes branches, tags `v*`) | Retour rapide au développeur à chaque push |
+| `pull_request` vers `main` | Contrôle obligatoire avant fusion (non-régression) |
+| `schedule` (lundi 6 h UTC) | Détecter les régressions dues aux dépendances ou aux nouvelles règles Sonar |
+| `workflow_dispatch` | Relancer le pipeline manuellement |
+
+`concurrency` annule un run devenu obsolète quand un nouveau commit arrive sur la même branche, ce qui évite de consommer des minutes inutilement.
+
+### 5.2 Jobs
+
+```
+back ──┐
+       ├──► sonar   (analyse + Quality Gate)
+front ─┤
+       └──► docker  (build des images back et front, sans publication)
+```
+
+| Job | Étapes | Résultats visibles |
+|---|---|---|
+| `back` | JDK 17 Temurin, cache Gradle, `./gradlew build` (compilation, tests JUnit, rapport JaCoCo) | Check « Tests back-end » sur le commit/PR, artefact `back-reports` (rapports HTML de tests et de couverture) |
+| `front` | Node 20, cache npm, `npm ci`, `npm audit`, `npm run test:ci` (Karma en Chrome Headless + couverture), build de production | Check « Tests front-end », artefact `front-coverage` |
+| `sonar` | Récupère les classes compilées et les rapports de couverture, lance l'analyse et attend la Quality Gate | Tableau de bord SonarQube Cloud, commentaire et statut sur la PR, échec du job si la Quality Gate n'est pas respectée |
+| `docker` | Build des cibles `back` et `front` du `Dockerfile` (matrice), cache GitHub Actions | Vérifie que les images se construisent ; la publication relève du pipeline CD |
+
+Les jobs `back` et `front` tournent **en parallèle**. `sonar` et `docker` ne s'exécutent que si les deux premiers réussissent : on n'analyse pas et on ne construit pas d'image à partir d'un code dont les tests échouent.
+
+### 5.3 Justification des choix
+
+- **Actions officielles et maintenues** : `actions/checkout`, `actions/setup-java`, `actions/setup-node`, `actions/upload-artifact` / `download-artifact` (GitHub), `gradle/actions/setup-gradle` (Gradle), `SonarSource/sonarqube-scan-action` (SonarSource), `docker/setup-buildx-action` / `docker/build-push-action` (Docker). Elles sont documentées et épinglées sur une version majeure.
+- **`mikepenz/action-junit-report`** : action largement utilisée qui transforme les rapports JUnit XML en *check* GitHub lisible (tests réussis/échoués, message d'erreur), sans avoir à ouvrir les logs. Côté front, `karma-junit-reporter` produit ce format.
+- **Script `npm run test:ci`** : exécution unique (`--watch=false`) en Chrome Headless sans sandbox, nécessaire sur les runners Linux, avec couverture. La même commande sert en local et en CI.
+- **Couverture** : JaCoCo (XML) côté back et `lcov` côté front sont les formats importés nativement par SonarQube Cloud.
+- **Une seule analyse Sonar pour le monorepo** (`sonar-project.properties` à la racine) : un seul tableau de bord et une seule Quality Gate pour l'application. `fetch-depth: 0` donne à Sonar l'historique git nécessaire pour identifier le nouveau code.
+- **`-Dsonar.qualitygate.wait=true`** : le pipeline échoue si la Quality Gate échoue, ce qui applique le plan de sécurité (section 2.2).
+- **Secrets** : le jeton Sonar est lu dans `secrets.SONAR_TOKEN`. S'il est absent (PR depuis un fork), l'analyse est ignorée avec un avertissement au lieu d'échouer.
+- **Permissions minimales** : `contents: read` par défaut ; `checks: write` seulement pour les jobs qui publient un rapport de tests.
+- **Audit npm non bloquant** : Angular 17 comporte des vulnérabilités connues (sévérité haute) qui ne se corrigent qu'en migrant vers une version majeure plus récente (Angular 19 ou au-delà). Le résultat reste visible dans les logs du job ; la migration est une action de suivi.
+- **Caches** (Gradle, npm, couches Docker) : réduisent la durée du pipeline, conformément à l'objectif « retour rapide » (section 1.3).
+
+### 5.4 Configuration SonarQube Cloud (une seule fois)
+
+1. Se connecter à [sonarcloud.io](https://sonarcloud.io) avec GitHub et importer le dépôt.
+2. Vérifier que l'organisation et la clé du projet correspondent à `sonar.organization` et `sonar.projectKey` dans `sonar-project.properties`.
+3. **Désactiver l'analyse automatique** (*Administration → Analysis Method*) : elle entre en conflit avec l'analyse lancée par la CI.
+4. Générer un jeton (*My Account → Security*) et l'enregistrer dans GitHub : *Settings → Secrets and variables → Actions → New repository secret*, nom `SONAR_TOKEN`.
